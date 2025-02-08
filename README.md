@@ -1,4 +1,4 @@
-```markdown
+```
 # Poll Votes API: Returning Raw Vote Data
 
 One of the API endpoints we need is to **retrieve raw vote data** for a specific poll. This will allow the frontend (or any client) to handle custom analytics, charts, or summaries directly without relying on more specialized API endpoints.
