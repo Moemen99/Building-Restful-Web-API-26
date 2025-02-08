@@ -83,3 +83,192 @@ With these contracts:
 
 By structuring the data into these **records**, you provide a **clean** and **easy-to-use** structure for clients who need direct, raw vote data.
 ```
+
+```
+# Returning Poll Votes (Raw Data) via a Results Service
+
+This step illustrates how to implement an endpoint that **retrieves** all votes for a particular poll and returns them in a **raw data format**.  
+We’ll create:
+
+1. A **Results Service** (`IResultService` + `ResultService`) that queries the database.  
+2. A **ResultsController** that exposes a `GET` endpoint to return the aggregated data.
+
+---
+
+## 1. Creating the `IResultService` and `ResultService`
+
+### 1.1. Interface: `IResultService`
+
+```csharp
+public interface IResultService
+{
+    Task<Result<PollVotesResponse>> GetPollVotesAsync(int pollId, CancellationToken cancellationToken = default);
+}
+```
+
+This interface defines a single method, `GetPollVotesAsync`, which, given a poll ID, returns either:
+
+- A successful `Result` containing a `PollVotesResponse`, or  
+- A failure `Result` (e.g., if the poll doesn’t exist).
+
+---
+
+### 1.2. Implementation: `ResultService`
+
+```csharp
+using Microsoft.EntityFrameworkCore;
+using SurveyBasket.Data; // Example namespace for ApplicationDbContext
+
+public class ResultService : IResultService
+{
+    private readonly ApplicationDbContext _context;
+
+    public ResultService(ApplicationDbContext context)
+    {
+        _context = context;
+    }
+
+    public async Task<Result<PollVotesResponse>> GetPollVotesAsync(
+        int pollId,
+        CancellationToken cancellationToken = default)
+    {
+        var pollVotes = await _context.Polls
+            .Where(poll => poll.Id == pollId)
+            .Select(poll => new PollVotesResponse(
+                // 1) Poll Title
+                poll.Title,
+                // 2) Collection of votes
+                poll.Votes.Select(vote => new VoteResponse(
+                    // Combine user first/last name
+                    $"{vote.User.FirstName} {vote.User.LastName}",
+                    // Date/time the vote was submitted
+                    vote.SubmittedOn,
+                    // Selected answers: question content + answer content
+                    vote.VoteAnswers.Select(va => new QuestionAnswerResponse(
+                        va.Question.Content,
+                        va.Answer.Content
+                    ))
+                ))
+            ))
+            .SingleOrDefaultAsync(cancellationToken);
+
+        // If no poll was found, return a failure with an appropriate error
+        if (pollVotes is null)
+        {
+            return Result.Failure<PollVotesResponse>(PollErrors.PollNotFound);
+        }
+
+        return Result.Success(pollVotes);
+    }
+}
+```
+
+Key Points:
+- We use **EF Core** to query the `Polls` table.
+- We join to the associated `Votes` and `VoteAnswers` via **navigation properties**.
+- We **project** the results into our `PollVotesResponse` → `VoteResponse` → `QuestionAnswerResponse` chain.
+
+---
+
+### 1.3. Registering the Service in DI
+
+In your **Program.cs** (or **Startup.cs**):
+
+```csharp
+services.AddScoped<IResultService, ResultService>();
+```
+
+This ensures `ResultService` can be injected wherever `IResultService` is required.
+
+---
+
+## 2. Creating the ResultsController
+
+We now expose an endpoint to fetch the raw vote data for a given poll.
+
+```csharp
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using YourApp.Extensions; // For result.ToProblem() extension
+
+[Route("api/polls/{pollId}/[controller]")]
+[ApiController]
+[Authorize]
+public class ResultsController : ControllerBase
+{
+    private readonly IResultService _resultService;
+
+    public ResultsController(IResultService resultService)
+    {
+        _resultService = resultService;
+    }
+
+    [HttpGet("raw-data")]
+    public async Task<IActionResult> PollVotes(
+        [FromRoute] int pollId,
+        CancellationToken cancellationToken)
+    {
+        var result = await _resultService.GetPollVotesAsync(pollId, cancellationToken);
+
+        return result.IsSuccess
+            ? Ok(result.Value)
+            : result.ToProblem();
+    }
+}
+```
+
+### Endpoint
+
+- **GET** `api/polls/{pollId}/results/raw-data`  
+- **Returns**:  
+  - `200 OK` with a `PollVotesResponse` if the poll exists.  
+  - A **problem** response (e.g., `404 Not Found`) if the poll ID is invalid or no votes are found.
+
+---
+
+## 3. Example Response
+
+```json
+{
+  "title": "Poll - 10",
+  "votes": [
+    {
+      "voterName": "Muhammad Ali",
+      "voteDate": "2024-05-15T02:25:46.7227923",
+      "selectedAnswers": [
+        {
+          "question": "question_1_updated",
+          "answer": "a1"
+        },
+        {
+          "question": "question_2",
+          "answer": "a3"
+        }
+      ]
+    }
+    // ... additional votes ...
+  ]
+}
+```
+
+### Fields
+
+- **title**: The poll’s title (e.g., “Poll - 10”).
+- **votes**: A list of votes. Each vote includes:
+  - **voterName**: User’s first + last name.
+  - **voteDate**: When the vote was submitted.
+  - **selectedAnswers**: Each answer selected, displaying **question** text and **answer** text.
+
+---
+
+## 4. Summary
+
+1. **Data Model**:  
+   - `PollVotesResponse` → `VoteResponse` → `QuestionAnswerResponse`.
+2. **Service**:  
+   - `ResultService.GetPollVotesAsync` queries the database and constructs the nested DTO/record hierarchy.
+3. **Controller**:  
+   - `ResultsController` exposes the **GET** endpoint, returning `PollVotesResponse` or an error.
+
+With this design, consumers of your API can easily process or display all votes for a given poll, enabling custom UI or data analytics on the **client-side**.
+```
