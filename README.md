@@ -445,3 +445,223 @@ With these additions, you now have:
 
 These endpoints offer flexibility for frontends or reporting tools to handle analytics and data visualizations without requiring additional custom endpoints.
 ```
+
+
+```
+# Votes per Question Endpoint
+
+This endpoint returns **each question** for a given poll along with the **answers** that were chosen and how many times each answer was selected. This can help the frontend or reporting systems display percentages or counts of how many users picked a certain answer.
+
+---
+
+## 1. Contracts: `VotesPerQuestionResponse` and `VotesPerAnswerResponse`
+
+In the `Contracts/Results` folder, create two record types to represent the **aggregated** vote data for each question:
+
+```csharp
+public record VotesPerQuestionResponse(
+    string Question,
+    IEnumerable<VotesPerAnswerResponse> SelectedAnswers
+);
+
+public record VotesPerAnswerResponse(
+    string Answer,
+    int Count
+);
+```
+
+- **`VotesPerQuestionResponse`**:
+  - **Question**: The text/content of the question.
+  - **SelectedAnswers**: A list of `VotesPerAnswerResponse`, one for each answer that was chosen.
+
+- **`VotesPerAnswerResponse`**:
+  - **Answer**: The answer text.
+  - **Count**: How many users selected that answer.
+
+---
+
+## 2. Extending the `Question` Entity (Domain Model)
+
+To easily navigate from a question to the votes for that question, ensure the `Question` entity includes a **navigation property** to `VoteAnswer`:
+
+```csharp
+public sealed class Question : AuditableEntity
+{
+    public int Id { get; set; }
+    public string Content { get; set; } = string.Empty;
+    public int PollId { get; set; }
+    public bool IsActive { get; set; } = true;
+    
+    public Poll Poll { get; set; } = default!;
+    public ICollection<Answer> Answers { get; set; } = new List<Answer>();
+    
+    // Navigation property for VoteAnswer
+    public ICollection<VoteAnswer> Votes { get; set; } = new List<VoteAnswer>();
+}
+```
+
+This allows us to access all votes (`VoteAnswer`) for a specific question.
+
+---
+
+## 3. Service Method: `GetVotesPerQuestionAsync`
+
+In your `IResultService`, define a new method:
+
+```csharp
+Task<Result<IEnumerable<VotesPerQuestionResponse>>> GetVotesPerQuestionAsync(
+    int pollId,
+    CancellationToken cancellationToken = default
+);
+```
+
+### Implementation in `ResultService`
+
+```csharp
+public async Task<Result<IEnumerable<VotesPerQuestionResponse>>> GetVotesPerQuestionAsync(
+    int pollId,
+    CancellationToken cancellationToken = default)
+{
+    // 1. Check if the poll exists
+    var pollExists = await _context.Polls
+        .AnyAsync(p => p.Id == pollId, cancellationToken);
+
+    if (!pollExists)
+    {
+        return Result.Failure<IEnumerable<VotesPerQuestionResponse>>(PollErrors.PollNotFound);
+    }
+
+    // 2. Aggregate votes by question and answer
+    var votesPerQuestion = await _context.VoteAnswers
+        .Where(va => va.Vote.PollId == pollId)
+        .Select(va => new VotesPerQuestionResponse(
+            va.Question.Content,
+            va.Question.Votes
+                .GroupBy(x => new { x.Answer.Id, x.Answer.Content })
+                .Select(g => new VotesPerAnswerResponse(
+                    g.Key.Content,
+                    g.Count()
+                ))
+        ))
+        .ToListAsync(cancellationToken);
+
+    return Result.Success<IEnumerable<VotesPerQuestionResponse>>(votesPerQuestion);
+}
+```
+
+#### Explanation
+
+1. **Poll Check**: If no poll matches the `pollId`, return a failure result (e.g., `PollErrors.PollNotFound`).  
+2. **Query**:
+   - Filter by `VoteAnswers` where `Vote.PollId` matches `pollId`.  
+   - For each `VoteAnswer`, select a `VotesPerQuestionResponse`:
+     - **`Question.Content`**: The question text.  
+     - **Group** by answer to count how many times each answer was chosen:
+       ```csharp
+       va.Question.Votes
+         .GroupBy(x => new { x.Answer.Id, x.Answer.Content })
+         .Select(g => new VotesPerAnswerResponse(
+             g.Key.Content,
+             g.Count()
+         ))
+       ```
+
+---
+
+## 4. Updating `ResultsController`
+
+Add the new endpoint to retrieve votes per question:
+
+```csharp
+[Route("api/polls/{pollId}/[controller]")]
+[ApiController]
+[Authorize]
+public class ResultsController : ControllerBase
+{
+    private readonly IResultService _resultService;
+
+    public ResultsController(IResultService resultService)
+    {
+        _resultService = resultService;
+    }
+
+    [HttpGet("raw-data")]
+    public async Task<IActionResult> PollVotes([FromRoute] int pollId, CancellationToken cancellationToken)
+    {
+        var result = await _resultService.GetPollVotesAsync(pollId, cancellationToken);
+        return result.IsSuccess ? Ok(result.Value) : result.ToProblem();
+    }
+
+    [HttpGet("votes-per-day")]
+    public async Task<IActionResult> VotesPerDay([FromRoute] int pollId, CancellationToken cancellationToken)
+    {
+        var result = await _resultService.GetVotesPerDayAsync(pollId, cancellationToken);
+        return result.IsSuccess ? Ok(result.Value) : result.ToProblem();
+    }
+
+    [HttpGet("votes-per-question")]
+    public async Task<IActionResult> VotesPerQuestion([FromRoute] int pollId, CancellationToken cancellationToken)
+    {
+        var result = await _resultService.GetVotesPerQuestionAsync(pollId, cancellationToken);
+        return result.IsSuccess ? Ok(result.Value) : result.ToProblem();
+    }
+}
+```
+
+### Endpoint
+
+- **`GET /api/polls/{pollId}/results/votes-per-question`**  
+  - Returns a list of `VotesPerQuestionResponse`.  
+  - Each item has a question and a list of answers with a **count** of how many times each was chosen.
+
+---
+
+## 5. Example Response
+
+```json
+[
+  {
+    "question": "What is your favorite color?",
+    "selectedAnswers": [
+      {
+        "answer": "Red",
+        "count": 10
+      },
+      {
+        "answer": "Blue",
+        "count": 15
+      },
+      {
+        "answer": "Green",
+        "count": 0
+      }
+    ]
+  },
+  {
+    "question": "Which programming language do you prefer?",
+    "selectedAnswers": [
+      {
+        "answer": "C#",
+        "count": 8
+      },
+      {
+        "answer": "Java",
+        "count": 12
+      }
+    ]
+  }
+]
+```
+
+---
+
+## Summary
+
+With this endpoint, you can retrieve:
+
+1. **Each question** in the poll.
+2. **Answers** that were chosen for that question.
+3. **Count** of how many votes each answer received.
+
+This data can be used to display **charts**, **percentages**, or any other analysis for how users responded to each question within a specific poll.
+```
