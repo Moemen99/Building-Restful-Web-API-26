@@ -272,3 +272,176 @@ public class ResultsController : ControllerBase
 
 With this design, consumers of your API can easily process or display all votes for a given poll, enabling custom UI or data analytics on the **client-side**.
 ```
+
+
+
+```
+# Retrieving Votes Per Day for a Specific Poll
+
+Building on our previous **Results** feature, we now add a new endpoint that returns the **number of votes** for a specific poll **grouped by day**. This helps the frontend create charts or statistics about voting trends over time.
+
+---
+
+## 1. New Contract: `VotesPerDayResponse`
+
+In your `Contracts/Results` folder, create a record that represents **one day** and the **number of votes** submitted on that day:
+
+```csharp
+public record VotesPerDayResponse(
+    DateOnly Date,
+    int NumberOfVotes
+);
+```
+
+- **`Date`**: The day on which votes were cast.  
+- **`NumberOfVotes`**: How many votes were cast on that date.
+
+---
+
+## 2. Extending `IResultService`
+
+Add a new method `GetVotesPerDayAsync` to the `IResultService` interface:
+
+```csharp
+public interface IResultService
+{
+    Task<Result<PollVotesResponse>> GetPollVotesAsync(int pollId, CancellationToken cancellationToken = default);
+    Task<Result<IEnumerable<VotesPerDayResponse>>> GetVotesPerDayAsync(int pollId, CancellationToken cancellationToken = default);
+}
+```
+
+---
+
+## 3. Implementing `GetVotesPerDayAsync` in `ResultService`
+
+In your `ResultService`, implement the logic to **group** votes by day and **count** them:
+
+```csharp
+public class ResultService : IResultService
+{
+    private readonly ApplicationDbContext _context;
+
+    public ResultService(ApplicationDbContext context)
+    {
+        _context = context;
+    }
+
+    // Existing method:
+    // public async Task<Result<PollVotesResponse>> GetPollVotesAsync(...)
+
+    public async Task<Result<IEnumerable<VotesPerDayResponse>>> GetVotesPerDayAsync(
+        int pollId,
+        CancellationToken cancellationToken = default)
+    {
+        // 1. Verify the poll exists
+        var pollExists = await _context.Polls
+            .AnyAsync(x => x.Id == pollId, cancellationToken);
+
+        if (!pollExists)
+        {
+            return Result.Failure<IEnumerable<VotesPerDayResponse>>(PollErrors.PollNotFound);
+        }
+
+        // 2. Group votes by date and count them
+        var votesPerDay = await _context.Votes
+            .Where(x => x.PollId == pollId)
+            .GroupBy(x => new { Date = DateOnly.FromDateTime(x.SubmittedOn) })
+            .Select(g => new VotesPerDayResponse(
+                g.Key.Date,
+                g.Count()
+            ))
+            .ToListAsync(cancellationToken);
+
+        return Result.Success<IEnumerable<VotesPerDayResponse>>(votesPerDay);
+    }
+}
+```
+
+### Explanation
+
+1. **Check Poll Existence**: If no poll matches the `pollId`, return a failure result (e.g., `PollErrors.PollNotFound`).  
+2. **Group by Date**: We use `DateOnly.FromDateTime(x.SubmittedOn)` to convert the `DateTime` to a `DateOnly`.  
+3. **Count Votes**: Each group represents a single day, so we `Count()` the number of votes in that group.
+
+---
+
+## 4. Updating `ResultsController`
+
+Add a new endpoint to return votes per day:
+
+```csharp
+[Route("api/polls/{pollId}/[controller]")]
+[ApiController]
+[Authorize]
+public class ResultsController : ControllerBase
+{
+    private readonly IResultService _resultService;
+
+    public ResultsController(IResultService resultService)
+    {
+        _resultService = resultService;
+    }
+
+    [HttpGet("raw-data")]
+    public async Task<IActionResult> PollVotes([FromRoute] int pollId, CancellationToken cancellationToken)
+    {
+        var result = await _resultService.GetPollVotesAsync(pollId, cancellationToken);
+        return result.IsSuccess 
+            ? Ok(result.Value) 
+            : result.ToProblem();
+    }
+
+    [HttpGet("votes-per-day")]
+    public async Task<IActionResult> VotesPerDay([FromRoute] int pollId, CancellationToken cancellationToken)
+    {
+        var result = await _resultService.GetVotesPerDayAsync(pollId, cancellationToken);
+        return result.IsSuccess 
+            ? Ok(result.Value) 
+            : result.ToProblem();
+    }
+}
+```
+
+### Endpoints
+
+1. **`GET /api/polls/{pollId}/results/raw-data`**  
+   - Returns detailed vote data (`PollVotesResponse`).
+
+2. **`GET /api/polls/{pollId}/results/votes-per-day`**  
+   - Returns an **array** of `VotesPerDayResponse` objects.  
+   - Each item includes a **Date** and the **NumberOfVotes** for that day.
+
+---
+
+## 5. Sample JSON Response for `GET /api/polls/{pollId}/results/votes-per-day`
+
+```json
+[
+  {
+    "date": "2024-05-16",
+    "numberOfVotes": 5
+  },
+  {
+    "date": "2024-05-17",
+    "numberOfVotes": 8
+  },
+  {
+    "date": "2024-05-18",
+    "numberOfVotes": 2
+  }
+]
+```
+
+This data can be used by the frontend to plot a **bar chart**, **line chart**, or any other visualization showing the **trend** of votes over time.
+
+---
+
+## Conclusion
+
+With these additions, you now have:
+
+- An endpoint to fetch **raw** vote data (`raw-data`).  
+- An endpoint to **aggregate** votes by day (`votes-per-day`).  
+
+These endpoints offer flexibility for frontends or reporting tools to handle analytics and data visualizations without requiring additional custom endpoints.
+```
